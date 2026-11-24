@@ -1,15 +1,13 @@
-"""
-Outils réutilisables : Brave Search, Crawl4AI, Gmail SMTP, Critic LLM.
-"""
+"""Outils réutilisables : Tavily, Crawl4AI, Gmail SMTP et LLM critique."""
 import os, ssl, smtplib, asyncio, requests, json
 from email.mime.text import MIMEText    
 from dotenv import load_dotenv
 from crawl4ai import AsyncWebCrawler,BrowserConfig,CrawlerRunConfig,CacheMode
 from crawl4ai.models import CrawlResult
-from langchain_openai import ChatOpenAI
+from agent.llm import create_llm
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.content_filter_strategy import PruningContentFilter
-from langchain_community.tools import BraveSearch
+from langchain_tavily import TavilySearch
 import os
 from agent.models import Director
 import logging
@@ -49,47 +47,37 @@ else:
     config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
 
 # --- Variables d'environnement -------------------------------------------------
-# Brave Search : on accepte deux noms de variables pour plus de souplesse.
-BRAVE_API_KEY = os.getenv("BRAVE_API_KEY") or os.getenv("BRAVE_SEARCH_API_KEY")
-if not BRAVE_API_KEY:
-    raise EnvironmentError(
-        "Veuillez définir la variable d'environnement BRAVE_API_KEY ou BRAVE_SEARCH_API_KEY."
+def _tavily_tool(k: int):
+    """Construit l'outil Tavily à partir de la clé configurée."""
+    if not os.getenv("TAVILY_API_KEY"):
+        raise EnvironmentError("Configurez TAVILY_API_KEY dans le fichier .env.")
+    return TavilySearch(max_results=k)
+
+
+def _format_tavily_results(results) -> str:
+    if isinstance(results, str):
+        results = json.loads(results)
+    if isinstance(results, dict):
+        results = results.get("results", [])
+    if not results:
+        return "Aucun résultat trouvé."
+    return "\n".join(
+        f"- [{item.get('title', 'Titre inconnu')}]({item.get('url', '#')})"
+        + (f"\n  {item['content'][:800]}" if item.get("content") else "")
+        for item in results
     )
 
-# Gmail SMTP : on vérifie la présence des deux variables requises.
-GMAIL_ADDR = os.getenv("GMAIL_ADDRESS")
-GMAIL_PASS = os.getenv("GMAIL_APP_PASSWORD")
-if not GMAIL_ADDR or not GMAIL_PASS:
-    raise EnvironmentError(
-        "Veuillez définir les variables GMAIL_ADDRESS et GMAIL_APP_PASSWORD pour envoyer des emails."
-    )
 
-
-def _brave_tool(k: int):
-    """Instancie le tool BraveSearch avec le nombre de résultats voulu."""
-    return BraveSearch.from_api_key(
-        api_key=BRAVE_API_KEY,
-        search_kwargs={"count": k},
-    )
-
-def brave_search(query: str, k: int = 5) -> str:
-    """
-    Renvoie les `k` premiers résultats au format Markdown
-    (titre cliquable — URL) via le wrapper LangChain.
-    """
+def tavily_search(query: str, k: int = 5) -> str:
+    """Renvoie les premiers résultats Tavily au format Markdown."""
     try:
-        logger.info(f"Brave search: {query}")
-        hits = _brave_tool(k).invoke(query)   
-        logger.info(f"Brave search results: {hits}")
-        # List[dict]
-        if isinstance(hits, str):
-            hits = json.loads(hits)
-        if not hits:
-            return "Aucun résultat trouvé."
-        return "\n".join(f"- {h.get('title', 'Titre inconnu')} — {h.get('link', '#')}" for h in hits)
+        logger.info("Tavily search: %s", query)
+        return _format_tavily_results(
+            _tavily_tool(k).invoke({"query": query})
+        )
     except Exception as e:
-        logger.error(f"Erreur lors de la recherche Brave pour '{query}': {e}")
-        return "Erreur lors de la recherche."
+        logger.exception("Erreur lors de la recherche Tavily pour %r", query)
+        return f"Erreur Tavily : {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -97,29 +85,16 @@ def brave_search(query: str, k: int = 5) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def abrave_search(query: str, k: int = 5) -> str:
-    """Equivalent asynchrone de `brave_search`.
-
-    Utilise la méthode `.ainvoke()` du wrapper LangChain afin d'éviter de
-    bloquer la boucle d'évènements. À employer avec `await` depuis un nœud
-    LangGraph asynchrone.
-    """
+async def atavily_search(query: str, k: int = 5) -> str:
+    """Version asynchrone de la recherche Tavily pour les nœuds LangGraph."""
     try:
-        logger.info(f"Brave search (async): {query}")
-        hits = await _brave_tool(k).ainvoke(query)
-        logger.info(f"Brave search results: {hits}")
-        if isinstance(hits, str):
-            hits = json.loads(hits)
-        if not hits:
-            return "Aucun résultat trouvé."
-        return "\n".join(
-            f"- {h.get('title', 'Titre inconnu')} — {h.get('link', '#')}" for h in hits
+        logger.info("Tavily search (async): %s", query)
+        return _format_tavily_results(
+            await _tavily_tool(k).ainvoke({"query": query})
         )
     except Exception as e:
-        logger.error(
-            f"Erreur (async) lors de la recherche Brave pour '{query}': {e}"
-        )
-        return "Erreur lors de la recherche."
+        logger.exception("Erreur async Tavily pour %r", query)
+        return f"Erreur Tavily : {e}"
 
 def _sync_crawl_markdown(url: str) -> str:
     """Version synchrone du crawling pour éviter les blocages."""
@@ -311,15 +286,42 @@ async def crawl_markdown(url: str) -> str:
 
 
 def send_gmail(to_email: str, subject: str, body: str) -> None:
+    if not body or not body.strip():
+        raise ValueError("Le corps de l'e-mail est vide ; aucun message n'a été envoyé.")
+    gmail_addr = (os.getenv("GMAIL_ADDRESS") or "").strip()
+    # Google affiche parfois le mot de passe d'application en groupes séparés.
+    gmail_pass = "".join((os.getenv("GMAIL_APP_PASSWORD") or "").split())
+    if not gmail_addr or not gmail_pass:
+        raise EnvironmentError(
+            "Configurez GMAIL_ADDRESS et GMAIL_APP_PASSWORD pour envoyer un e-mail."
+        )
+    if len(gmail_pass) != 16:
+        raise ValueError(
+            "GMAIL_APP_PASSWORD doit contenir le mot de passe d'application Google "
+            "de 16 caractères, sans utiliser le mot de passe normal du compte Gmail."
+        )
+
     msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"], msg["From"], msg["To"] = subject, GMAIL_ADDR, to_email
+    msg["Subject"], msg["From"], msg["To"] = subject, gmail_addr, to_email
     context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as smtp:
-        smtp.login(GMAIL_ADDR, GMAIL_PASS)
-        smtp.sendmail(GMAIL_ADDR, [to_email], msg.as_string())
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=30) as smtp:
+            smtp.login(gmail_addr, gmail_pass)
+            smtp.sendmail(gmail_addr, [to_email], msg.as_string())
+        logger.info("E-mail transmis à Gmail (corps: %s caractères).", len(body))
+    except smtplib.SMTPAuthenticationError as exc:
+        raise RuntimeError(
+            "Gmail a refusé l'authentification. Vérifiez l'adresse et régénérez "
+            "le mot de passe d'application Google."
+        ) from exc
+    except smtplib.SMTPServerDisconnected as exc:
+        raise RuntimeError(
+            "Gmail a fermé la connexion pendant l'authentification. Vérifiez que "
+            "GMAIL_APP_PASSWORD est un mot de passe d'application Google valide."
+        ) from exc
 
 # === Critic : simple LLM « OK / NO » =========================================
-_llm_critic = ChatOpenAI(model="gpt-4.1-nano")
+_llm_critic = create_llm()
 
 
 def critic(llm_or_draft, draft: str | None = None) -> str:
@@ -358,4 +360,3 @@ if os.name == "nt":
     except AttributeError:
         # Python < 3.8 : WindowsProactorEventLoopPolicy peut ne pas exister
         logger.warning("WindowsProactorEventLoopPolicy indisponible ; la policy courante est conservée.")
-

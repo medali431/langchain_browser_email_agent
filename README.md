@@ -4,9 +4,9 @@
 
 Ce dépôt propose un **agent IA "browser‑email"** basé sur LangChain, LangGraph et le crawler Playwright *Crawl4AI*. Il automatise :
 
-- la recherche d’informations d’entreprise via Brave Search
+- la recherche d’informations d’entreprise via Tavily
 - l’extraction de contenu Web (JavaScript, PDF, vitesse humaine)
-- la synthèse par LLM (OpenAI GPT‑4o ou modèle compatible)
+- la synthèse par LLM Groq
 - la génération d’un brouillon d’e‑mail personnalisable aux décideurs identifiés
 
 Le tout est orchestré sous forme de **graphes LangGraph** facilement visualisables dans LangGraph Studio.
@@ -15,7 +15,7 @@ Le tout est orchestré sous forme de **graphes LangGraph** facilement visualisab
 
 ## Fonctionnalités clés
 
-- **Recherche sémantique** avec Brave Search API
+- **Recherche Web** avec Tavily
 - **Crawling contextuel** (Crawl4AI + Playwright) pour récupérer des pages riches
 - **Raffinement des données** (LLM « Critic ») avant envoi
 - **Template d’e‑mail prêt à l’emploi** via SMTP Gmail
@@ -28,7 +28,7 @@ Le tout est orchestré sous forme de **graphes LangGraph** facilement visualisab
 
 ```
 ┌──────────────┐      ┌───────────────┐     ┌──────────────┐
-│ Brave Search │──┐  │  Crawl4AI     │──┐  │  Gmail SMTP  │
+│    Tavily    │──┐  │  Crawl4AI     │──┐  │  Gmail SMTP  │
 └──────────────┘  │  └───────────────┘  │  └──────────────┘
                   ▼                     ▼
             ┌─────────────────────────────────┐
@@ -51,8 +51,8 @@ Chaque étape (nœud) ajoute ou lit des champs dans l’état typé Pydantic (vo
 | Python                                    | **3.11**         | Compatibilité LangGraph CLI |
 | Playwright                                | 1.44+            | Rendu de pages JS           |
 | Git                                       | n’importe        | clonage du repo             |
-| Brave Search API key                      | active           | requêtes Web                |
-| OpenAI ou modèle équivalent               | clé valide       | génération LLM              |
+| Tavily API key                             | active           | recherches Web              |
+| GroqCloud                                 | clé valide       | génération LLM              |
 | Compte Gmail + mot‑de‑passe d’application | facultatif       | envoi d’e‑mails             |
 
 ---
@@ -85,13 +85,16 @@ $ cp .env.example .env  # ou renommez‑le simplement
 
 | Variable             | Description                                                                                         |
 | -------------------- | --------------------------------------------------------------------------------------------------- |
-| `OPENAI_API_KEY`     | Clé OpenAI ou de votre modèle compatible                                                            |
-| `BRAVE_API_KEY`      | Clé d’API Brave Search ([https://developer.brave.com/search/](https://developer.brave.com/search/)) |
+| `GROQ_API_KEY`       | Clé API GroqCloud                                                                                     |
+| `GROQ_MODEL`         | Identifiant exact d’un modèle actif et accessible dans votre compte Groq                              |
+| `TAVILY_API_KEY`     | Clé API Tavily ([https://app.tavily.com/](https://app.tavily.com/))                                  |
 | `GMAIL_ADDRESS`      | Adresse Gmail expéditrice                                                                           |
-| `GMAIL_APP_PASSWORD` | Mot‑de‑passe d’application (obligatoire si 2FA)                                                     |
+| `GMAIL_APP_PASSWORD` | Mot de passe d’application Google de 16 caractères (pas le mot de passe Gmail normal)                |
 | `LANGSMITH_*`        | (Optionnel) pour le traçage LangSmith                                                               |
 
 > **Astuce :** ne versionnez jamais votre `.env`. Ajoutez‑le à votre `.gitignore`.
+>
+> Le modèle par défaut est `openai/gpt-oss-20b`. Vous pouvez le remplacer par un identifiant actif autorisé sur votre compte Groq.
 
 ---
 
@@ -126,7 +129,7 @@ Le test affiche un extrait markdown de la page cible pour vérifier que Playwrig
 | ----------------------- | ------------------------------------------------------------------- | -------------------------------- |
 | Nouvel outil (API, DB…) | `agent/tools.py`                                                    | Déclarez une fonction + @tool    |
 | Modifier le prompt LLM  | `agent/chat_graph.py` ou `agent/enrich_graph.py`                    | variable `prompt`                |
-| Changer le modèle       | `agent/models.py` (config) ou passage du nom de modèle `ChatOpenAI` |                                  |
+| Changer le modèle       | `GROQ_MODEL` dans `.env`                                           |                                  |
 | Ajuster le workflow     | `agent/chat_graph.py`                                               | Méthodes async + edges LangGraph |
 
 ---
@@ -143,7 +146,7 @@ Le test affiche un extrait markdown de la page cible pour vérifier que Playwrig
 | Symptôme                                                                          | Cause probable            | Correctif                           |
 | --------------------------------------------------------------------------------- | ------------------------- | ----------------------------------- |
 | `playwright._impl._api_types.Error: BrowserType.launch: Executable doesn’t exist` | Navigateurs non installés | `playwright install chromium`       |
-| `EnvironmentError: Veuillez définir BRAVE_API_KEY`                                | Variable manquante        | Vérifiez votre `.env`               |
+| `Configurez TAVILY_API_KEY`                                                       | Variable manquante        | Ajoutez votre clé Tavily au `.env`  |
 | Échec SMTP                                                                        | Auth Gmail 2FA            | Créez un mot‑de‑passe d’application |
 
 ---
@@ -154,4 +157,3 @@ Le test affiche un extrait markdown de la page cible pour vérifier que Playwrig
 2. Respectez la PEP 8 et formatez avec `black`.
 3. Couverture : ajoutez un test pytest.
 4. Ouvrez une Pull Request descriptive.
-

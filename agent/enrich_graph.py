@@ -3,12 +3,18 @@ Graphe principal + sous‑graphe d'enrichissement Entreprise.
 Boucle d'auto‑correction « draft ↔ review ».
 """
 from langgraph.graph import StateGraph, START, END
-from langchain_openai import ChatOpenAI
 from agent.models import EnrichState, CompanyInfo, Director
 from agent import tools
 import re, logging
 
 logger = logging.getLogger("enrich_graph")
+MAX_CONTEXT_CHARS = 9000
+
+
+def _append_context(current: str, addition: str) -> str:
+    """Garde le contexte de recherche sous une taille adaptée au quota Groq."""
+    remaining = max(0, MAX_CONTEXT_CHARS - len(current))
+    return current + addition[:remaining]
 
 # -- Helpers -----------------------------------------------------------------
 
@@ -74,7 +80,9 @@ async def fetch_societe(state: EnrichState):
     logger.info("[Enrich] Societe.com markdown récupéré")
 
     company_info = _parse_societe_markdown(markdown, state.company)
-    ctx = state.context + markdown
+    # Analyser la page complète localement, mais ne transmettre qu'un court
+    # extrait : les pages de résultats contiennent beaucoup d'entrées annexes.
+    ctx = _append_context(state.context, "\n" + markdown[:5000])
     state.company_info = company_info
     return {"context": ctx, "company_info": company_info}
 
@@ -84,7 +92,8 @@ async def directors(state: EnrichState):
     gathered_directors = await tools.crawl_dirigeants(state.company_info.site_url)
     logger.info(f"Gathered directors: {gathered_directors}")
     logger.info(f"[Enrich] crawl_dirigeants → {len(gathered_directors)} dirigeants")
-    ctx = state.context + "\n" + "\n".join([f"{d.first_name} {d.last_name}" for d in gathered_directors])
+    names = "\n".join(f"{d.first_name} {d.last_name}" for d in gathered_directors)
+    ctx = _append_context(state.context, "\n" + names)
     state.company_info.directors = gathered_directors
     return {"context": ctx, "company_info": state.company_info}
 
@@ -99,12 +108,17 @@ async def profiles(state: EnrichState):
                 name = f"{director.first_name} {director.last_name}".strip()
             else:
                 name = str(director)
-            linkedin_profiles = await tools.abrave_search(f"{name} LinkedIn", k=3)
-            ctx += "\n### Profil Linkedin des dirigeants potentiels " + linkedin_profiles
+            linkedin_profiles = await tools.atavily_search(f"{name} LinkedIn", k=3)
+            ctx = _append_context(
+                ctx, "\n### Profil LinkedIn potentiel\n" + linkedin_profiles
+            )
             logger.info(f"Linkedin Search profiles: {linkedin_profiles}")
     else:
         # fallback : recherche générique sur la société
-        ctx += "\n### Profil Linkedin des dirigeants potentiels " + await tools.abrave_search(f"{state.company} LinkedIn", k=3)
+        profile_results = await tools.atavily_search(f"{state.company} LinkedIn", k=3)
+        ctx = _append_context(
+            ctx, "\n### Profil LinkedIn potentiel\n" + profile_results
+        )
 
     return {"context": ctx, "company_info": state.company_info}
 

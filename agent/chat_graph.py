@@ -15,13 +15,13 @@ from langgraph.graph import StateGraph, START, END
 from agent.models import ConvState
 from agent import tools
 from agent.enrich_graph import enrich_graph as enrich_subgraph
-from langchain_openai import ChatOpenAI
+from agent.llm import create_llm
 from langchain_core.prompts import ChatPromptTemplate
 from logging import getLogger
 from uuid import uuid4
 from agent.models import EnrichState
 
-llm = ChatOpenAI(model="gpt-4.1", streaming=True)
+llm = create_llm(streaming=True)
 
 logger = getLogger("main_graph_logger")
 
@@ -73,9 +73,9 @@ async def extract_intent(state: ConvState):
 # ---------- GRAPH ------------------------------------------------------------
 
 async def enrich(state:ConvState):
-    """Recherche Brave + Crawl4AI, stocke résumé dans ToolMessage."""
+    """Recherche Tavily + Crawl4AI, stocke le résumé dans ToolMessage."""
     company = state.extracted_company
-    summary  = await tools.abrave_search(f"{company} produit dirigeant", k=3)
+    summary  = await tools.atavily_search(f"{company} produit dirigeant", k=3)
     logger.info(f"Summary: {summary}")
     # Cherche un lien LinkedIn dans les résultats
     linkedin_url = None
@@ -107,17 +107,24 @@ async def enrich(state:ConvState):
 
 async def draft_summary(state: ConvState):
     """Produit un résumé Markdown des infos collectées."""
+    # Garde une marge sous le quota TPM Groq, y compris quand les pages web
+    # renvoient beaucoup de texte ou que l'état contient un ancien contexte.
+    context = (state.context or "")[:9000]
     prompt = (
         f"### Résumé des informations sur {state.extracted_company}\n\n"
         f"### Informations collectées\n"
         f"{state.company_info}"
         f"### Contexte de recherche\n"
-        f"{state.context}\n\n"
+        f"{context}\n\n"
         "Rédige un rapport clair et concis."
         "Pour chaque dirigeant, rédige un paragraphe de 3-4 lignes sur son profil et son parcours. Si leurs profils sur leurs réseaux sociaux sont disponibles, inclure un lien vers leur profil. (doit être le bon profil précis des dirigeants)"
     )
     result = await llm.ainvoke(prompt)
-    state.summary = result.content
+    content = result.content
+    state.summary = content.strip() if isinstance(content, str) else str(content).strip()
+    if not state.summary:
+        raise RuntimeError("Groq a renvoyé un rapport vide ; aucun e-mail ne sera envoyé.")
+    logger.info("Rapport généré (caractères: %s)", len(state.summary))
     # Mémoire
     state.last_company = state.extracted_company
     state.last_report = state.summary
@@ -134,7 +141,9 @@ def send_email(state: ConvState):
     if not state.user_email:
         logger.warning("Adresse e-mail manquante, envoi annulé.")
         return {}
-    body = state.summary
+    body = (state.summary or state.last_report or "").strip()
+    if not body:
+        raise ValueError("Rapport vide : l'e-mail n'a pas été envoyé.")
     if state.extra_note:
         body += f"\n\n---\n{state.extra_note}"
     tools.send_gmail(
@@ -172,7 +181,10 @@ def build_main_graph():
         )
         result = await enrich_subgraph.ainvoke(e_state)
         # Fusionner les champs renvoyés par le sous-graphe ----------------------
-        logger.info(f"Enrich result: {result}")
+        logger.info(
+            "Enrich result received (context chars: %s)",
+            len(result.get("context") or ""),
+        )
 
         # Contexte mis à jour
         state.context = result.get("context", state.context)
@@ -208,7 +220,6 @@ def build_main_graph():
         },
     )
     g.add_edge("reuse_report", "summary")
-    g.add_edge("extract_intent", "enrich")  # cas False
     g.add_edge("enrich", "summary")
     # Choix canal
     g.add_conditional_edges(

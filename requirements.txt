@@ -1,11 +1,11 @@
 langchain
 langgraph
-langchain-openai
+langchain-groq
+langchain-tavily
 python-dotenv
 requests
 playwright
 crawl4ai
-openai
 pytest
 langgraph-cli
 langgraph-cli[inmem]
